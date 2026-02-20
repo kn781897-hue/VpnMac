@@ -1,0 +1,162 @@
+{
+  "project_info": {
+    "project_number": "367055904950",
+    "project_id": "pulse-vpn-app-46893",
+    "storage_bucket": "pulse-vpn-app-46893.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:367055904950:android:2d94e169eb7ba125470617",
+        "android_client_info": {
+          "package_name": "com.example.vpn"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "367055904950-epac3h6f63soqnencqeiqjggob196l0m.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCWqaqSkBUg_JLU-5poVk2W_wwYJNHdqM8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "367055904950-epac3h6f63soqnencqeiqjggob196l0m.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "367055904950-l3of92ggkor21jiu3op08tti4js4en27.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.vpn"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:367055904950:android:0af5527195d6381c470617",
+        "android_client_info": {
+          "package_name": "com.example.vpn_final"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "367055904950-q32q5be0so3ar1b0f9e990l56qe2u92s.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.vpn_final",
+            "certificate_hash": "a93a791fc2bf7bc7f45e8a988be66c3fd87a5022"
+          }
+        },
+        {
+          "client_id": "367055904950-epac3h6f63soqnencqeiqjggob196l0m.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCWqaqSkBUg_JLU-5poVk2W_wwYJNHdqM8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "367055904950-epac3h6f63soqnencqeiqjggob196l0m.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "367055904950-l3of92ggkor21jiu3op08tti4js4en27.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.vpn"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:367055904950:android:caa2886f7d00beb2470617",
+        "android_client_info": {
+          "package_name": "com.example.vpnmac"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "367055904950-epac3h6f63soqnencqeiqjggob196l0m.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCWqaqSkBUg_JLU-5poVk2W_wwYJNHdqM8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "367055904950-epac3h6f63soqnencqeiqjggob196l0m.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "367055904950-l3of92ggkor21jiu3op08tti4js4en27.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.vpn"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:367055904950:android:457f1bbe50641d2f470617",
+        "android_client_info": {
+          "package_name": "com.nikolay.myvpn"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "367055904950-epac3h6f63soqnencqeiqjggob196l0m.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCWqaqSkBUg_JLU-5poVk2W_wwYJNHdqM8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "367055904950-epac3h6f63soqnencqeiqjggob196l0m.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "367055904950-l3of92ggkor21jiu3op08tti4js4en27.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.vpn"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
