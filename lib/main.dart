@@ -197,17 +197,45 @@ class _HomeScreenState extends State<HomeScreen> {
           "geoip:private"
         ]
       },
+      
+      {
+        "type": "field",
+        "outboundTag": "proxy",
+        "domain": [
+          "dns.google",
+          "cloudflare-dns.com"
+        ]
+      },
+
       {
         "type": "field",
         "outboundTag": "proxy",
         "domain": [
           "geosite:google",
           "geosite:openai",
-          "geosite:youtube"
+          "geosite:youtube",
+          "domain:aistudio.google.com",        
+          "domain:generativeai.googleapis.com",
+          "domain:gemini.google.com",           
+          "domain:ai.com"                       
         ]
       }
     ]
-  }
+  },
+
+  "dns": {
+  "servers": [
+    {
+      "address": "https://dns.google/dns-query",
+      "domains": ["geosite:google"]
+    },
+    {
+      "address": "https://1.1.1.1/dns-query"
+    },
+    "8.8.8.8"
+  ],
+  "queryStrategy": "UseIPv4"
+}
 }
 ''';
   
