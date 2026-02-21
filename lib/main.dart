@@ -411,15 +411,19 @@ class _HomeScreenState extends State<HomeScreen> {
 
       // 2. Внутренняя функция для копирования файлов
       Future<void> copyAndChmod(String filename) async {
-        final file = File('${coreDir.path}/$filename');
-        // Перезаписываем всегда, чтобы обновить при новой версии
-        final byteData = await rootBundle.load("assets/core/$filename");
+        // Если мы на Windows и файл xray, меняем название на xray.exe
+        String targetName = filename;
+        if (Platform.isWindows && filename == 'xray') {
+          targetName = 'xray.exe';
+        }
+
+        final file = File('${coreDir.path}/$targetName');
+        final byteData = await rootBundle.load("assets/core/$targetName");
         await file.writeAsBytes(byteData.buffer.asUint8List(), flush: true);
         
-        // Даем права на выполнение (критично для Release!)
-        if (filename == 'xray') {
+        // chmod нужен ТОЛЬКО для macOS/Linux
+        if (!Platform.isWindows && filename == 'xray') {
           await Process.run('chmod', ['+x', file.path]);
-          // Пытаемся снять карантин Apple
           try { await Process.run('xattr', ['-d', 'com.apple.quarantine', file.path]); } catch (_) {}
         }
       }
@@ -438,14 +442,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
       // 6. ЗАПУСК ЯДРА
       print("[DEBUG] Запускаю Xray...");
+
+      String execName = Platform.isWindows ? "xray.exe" : "xray";
       
       _xrayProcess = await Process.start(
-        "${coreDir.path}/xray",
+        "${coreDir.path}/$execName",
         ['-c', 'config.json'],
-        workingDirectory: coreDir.path, // <--- ВАЖНО: Рабочая папка
-        runInShell: false,
+        workingDirectory: coreDir.path,
+        runInShell: Platform.isWindows, // На Windows часто нужно ставить true
         environment: {
-          // <--- КРИТИЧНО: Указываем Xray, где искать базы
           'xray.location.asset': coreDir.path, 
         },
       );
@@ -470,40 +475,45 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _setSystemProxy(bool enable) async {
-    // Обычно интерфейс называется 'Wi-Fi' или 'en0'. 
-    // Если у вас не работает, можно попробовать автоопределение, но пока оставим 'Wi-Fi'
-    const interface = 'Wi-Fi'; 
-
-    if (enable) {
-      // 1. ВКЛЮЧАЕМ (Устанавливаем адрес + Включаем галочку)
-      
-      // HTTP (для обычных сайтов)
-      await Process.run('networksetup', ['-setwebproxy', interface, '127.0.0.1', '10809']);
-      await Process.run('networksetup', ['-setwebproxystate', interface, 'on']);
-      
-      // HTTPS (для защищенных сайтов - ВАЖНО!)
-      await Process.run('networksetup', ['-setsecurewebproxy', interface, '127.0.0.1', '10809']);
-      await Process.run('networksetup', ['-setsecurewebproxystate', interface, 'on']);
-      
-      // SOCKS (для всего остального - Telegram и т.д.)
-      await Process.run('networksetup', ['-setsocksfirewallproxy', interface, '127.0.0.1', '10808']);
-      await Process.run('networksetup', ['-setsocksfirewallproxystate', interface, 'on']);
-      
-    } else {
-      // 2. ВЫКЛЮЧАЕМ (Снимаем все галочки)
-      
-      await Process.run('networksetup', ['-setwebproxystate', interface, 'off']);
-      await Process.run('networksetup', ['-setsecurewebproxystate', interface, 'off']);
-      await Process.run('networksetup', ['-setsocksfirewallproxystate', interface, 'off']);
+    if (Platform.isWindows) {
+      if (enable) {
+        // Включаем прокси в Windows (направляем весь HTTP/HTTPS трафик на порт 10809)
+        await Process.run('reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '1', '/f']);
+        await Process.run('reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyServer', '/t', 'REG_SZ', '/d', '127.0.0.1:10809', '/f']);
+      } else {
+        // Выключаем прокси в Windows
+        await Process.run('reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '0', '/f']);
+      }
+    } 
+    else if (Platform.isMacOS) {
+      const interface = 'Wi-Fi'; // или Автоопределение
+      if (enable) {
+        await Process.run('networksetup', ['-setwebproxy', interface, '127.0.0.1', '10809']);
+        await Process.run('networksetup', ['-setwebproxystate', interface, 'on']);
+        await Process.run('networksetup', ['-setsecurewebproxy', interface, '127.0.0.1', '10809']);
+        await Process.run('networksetup', ['-setsecurewebproxystate', interface, 'on']);
+        await Process.run('networksetup', ['-setsocksfirewallproxy', interface, '127.0.0.1', '10808']);
+        await Process.run('networksetup', ['-setsocksfirewallproxystate', interface, 'on']);
+      } else {
+        await Process.run('networksetup', ['-setwebproxystate', interface, 'off']);
+        await Process.run('networksetup', ['-setsecurewebproxystate', interface, 'off']);
+        await Process.run('networksetup', ['-setsocksfirewallproxystate', interface, 'off']);
+      }
     }
   }
   // Не забудьте обновить _stopVpn, чтобы он вызывал _setSystemProxy(false)
   Future<void> _stopVpn() async {
-    await _setSystemProxy(false); // Выключаем прокси
+    await _setSystemProxy(false);
 
     _xrayProcess?.kill();
     _xrayProcess = null;
-    Process.run('killall', ['xray']);
+
+    // Убиваем процесс в зависимости от ОС
+    if (Platform.isWindows) {
+      await Process.run('taskkill', ['/F', '/IM', 'xray.exe']);
+    } else {
+      await Process.run('killall', ['xray']);
+    }
 
     setState(() {
       isConnected = false;
@@ -1390,18 +1400,21 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       // 1. ПИНГ (С таймаутом и полным путем)
       try {
-        final pingRes = await Process.run('/sbin/ping', ['-c', '1', '-t', '1', '8.8.8.8'])
-            .timeout(const Duration(milliseconds: 1000));
-        
-        if (pingRes.stdout.toString().contains("time=")) {
-          final pingMatch = RegExp(r'time=(\d+\.?\d*)').firstMatch(pingRes.stdout.toString());
+        if (Platform.isWindows) {
+          // Windows ping: ping -n 1 -w 1000 8.8.8.8
+          final pingRes = await Process.run('ping', ['-n', '1', '-w', '1000', '8.8.8.8']);
+          final pingMatch = RegExp(r'время[=<](\d+)мс', caseSensitive: false).firstMatch(pingRes.stdout.toString()) ?? 
+                            RegExp(r'time[=<](\d+)ms', caseSensitive: false).firstMatch(pingRes.stdout.toString());
           if (pingMatch != null) {
-            ping = double.parse(pingMatch.group(1)!).toStringAsFixed(0);
+            ping = pingMatch.group(1)!;
           }
+        } else {
+          // MacOS ping (Твой старый код)
+          final pingRes = await Process.run('/sbin/ping', ['-c', '1', '-t', '1', '8.8.8.8']);
+          final pingMatch = RegExp(r'time=(\d+\.?\d*)').firstMatch(pingRes.stdout.toString());
+          if (pingMatch != null) ping = double.parse(pingMatch.group(1)!).toStringAsFixed(0);
         }
-      } catch (_) {
-        // Если пинг не прошел - не страшно, оставим старое значение или прочерк
-      }
+      } catch (_) {}
 
       // 2. ТРАФИК (Умный перебор интерфейсов)
       // Сначала пробуем en0 (Wi-Fi) и en1 (кабель), так как utun (VPN) часто глючит в netstat
@@ -1414,6 +1427,39 @@ class _HomeScreenState extends State<HomeScreen> {
       interfacesToTry = interfacesToTry.toSet().toList(); // Убираем дубликаты
 
       for (String iface in interfacesToTry) {
+        if (Platform.isWindows) {
+        try {
+          final netRes = await Process.run('netstat', ['-e']);
+          final lines = netRes.stdout.toString().split('\n');
+          // Вторая строка содержит "Байты    [Получено]    [Отправлено]"
+          if (lines.length > 1) {
+            final parts = lines[1].trim().split(RegExp(r'\s+'));
+            if (parts.length >= 3) {
+              int currentRx = int.tryParse(parts[1]) ?? 0; // Входящие
+              int currentTx = int.tryParse(parts[2]) ?? 0; // Исходящие
+
+              if (currentRx > 0 || currentTx > 0) {
+                int diffRx = currentRx - _lastRxBytes;
+                int diffTx = currentTx - _lastTxBytes;
+
+                if (diffRx < 0 || diffRx > 500000000) diffRx = 0;
+                if (diffTx < 0 || diffTx > 500000000) diffTx = 0;
+
+                _lastRxBytes = currentRx;
+                _lastTxBytes = currentTx;
+
+                double instantDl = (diffRx * 8) / 1000000;
+                double instantUl = (diffTx * 8) / 1000000;
+
+                _smoothDl = (_smoothDl * 0.7) + (instantDl * 0.3);
+                _smoothUl = (_smoothUl * 0.7) + (instantUl * 0.3);
+                dataFound = true;
+              }
+            }
+          }
+        } catch (_) {}
+      } else {
+      
         try {
           final netRes = await Process.run('/usr/sbin/netstat', ['-I', iface, '-b'])
               .timeout(const Duration(milliseconds: 500));
@@ -1459,6 +1505,7 @@ class _HomeScreenState extends State<HomeScreen> {
         } catch (_) {
           continue; // Ошибка с этим интерфейсом, пробуем следующий
         }
+      }
       }
     } catch (e) {
       print("[Stats Error] $e");
