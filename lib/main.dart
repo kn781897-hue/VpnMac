@@ -1,19 +1,21 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:window_manager/window_manager.dart';
-import 'dart:async'; // Для таймера графика
-import 'dart:ui';    // Для ImageFilter (размытие стекла)
-import 'package:url_launcher/url_launcher.dart'; // <--- ДОБАВИТЬ ЭТО
+import 'dart:async';
+import 'dart:ui';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'firebase_options.dart'; // <--- Этот файл создался автоматически
-import 'package:cloud_firestore/cloud_firestore.dart'; // <--- НЕ ЗАБУДЬТЕ ИМПОРТ
-import 'package:intl/intl.dart'; // Для красивой даты (добавьте в pubspec intl: ^0.19.0)
+import 'firebase_options.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:intl/intl.dart';
 import 'package:flutter/services.dart' show rootBundle;
-
+import 'package:http/http.dart' as http;
+import 'package:cupertino_native/cupertino_native.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
@@ -57,7 +59,8 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WindowListener {
+  double _appOpacity = 1.0;
   bool isConnected = false;
   Process? _xrayProcess;
   String statusText = "TAP TO CONNECT";
@@ -71,6 +74,8 @@ class _HomeScreenState extends State<HomeScreen> {
   
   // === ПЕРЕМЕННЫЕ ДЛЯ РЕАЛЬНОЙ СТАТИСТИКИ ===
   Timer? _statsTimer;
+  Timer? _limitTimer;
+  DateTime? _connectionStartTime;
 
   int _lastRxBytes = 0;
   int _lastTxBytes = 0;
@@ -91,12 +96,17 @@ class _HomeScreenState extends State<HomeScreen> {
   final _passController = TextEditingController();
   User? _currentUser;
 
-   // === ДАННЫЕ ПОДПИСКИ ===
+  // === ДАННЫЕ ПОДПИСКИ ===
   bool _isPremium = false;
   String _expiryDate = "-";
   bool _isLoginMode = true;
-  final TextEditingController _confirmPassController = TextEditingController(); // Для повтора пароля
-  double _passwordStrength = 0.0; // От 0.0 до 1.0
+  final TextEditingController _confirmPassController = TextEditingController();
+  double _passwordStrength = 0.0;
+  bool _isLoading = false; // Для спиннера входа/оплаты
+
+  // === ОПЛАТА ===
+  // URL сервера оплаты (замените на ваш реальный путь если отличается)
+  static const String _paymentServerUrl = 'http://31.58.87.8:3000';
 
   // === ОБНОВЛЕННЫЙ КОНФИГ ПОД ВАШ СКРИНШОТ (VMess + WebSocket) ===
  final String xrayConfig = '''
@@ -239,32 +249,51 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 ''';
   
+  String _networkServiceName = "Wi-Fi";
+
   Future<void> _detectActiveInterface() async {
     try {
       print("[DEBUG] Ищу активный сетевой интерфейс...");
-      // Команда 'route get default' показывает маршрут по умолчанию
       final result = await Process.run('route', ['get', 'default']);
       final output = result.stdout.toString();
-      
-      // Ищем строчку "interface: en0" (или en1, enX)
       final RegExp regExp = RegExp(r'interface: (\w+)');
       final match = regExp.firstMatch(output);
       
       if (match != null) {
         _networkInterface = match.group(1)!;
-        print("[DEBUG] Нашел активный интерфейс: $_networkInterface");
-      } else {
-        print("[DEBUG] Не удалось определить интерфейс, использую fallback: $_networkInterface");
-        print("[DEBUG] Вывод команды route:\n$output");
+        print("[DEBUG] Нашел в маршрутах: $_networkInterface");
+        
+        // Теперь ищем Service Name для этого Device (en0 -> Wi-Fi)
+        final serviceRes = await Process.run('networksetup', ['-listnetworkserviceorder']);
+        final serviceOut = serviceRes.stdout.toString();
+        
+        // Ищем блок, где есть наш девайс
+        final lines = serviceOut.split('\n');
+        for (int i = 0; i < lines.length; i++) {
+          if (lines[i].contains("Device: $_networkInterface")) {
+            // Имя сервиса обычно в предыдущей строке: (1) Wi-Fi
+            if (i > 0) {
+              final serviceMatch = RegExp(r'\(\d+\)\s+(.*)').firstMatch(lines[i-1]);
+              if (serviceMatch != null) {
+                _networkServiceName = serviceMatch.group(1)!.trim();
+                print("[DEBUG] Соответствующий сервис: $_networkServiceName");
+                return;
+              }
+            }
+          }
+        }
       }
+      print("[DEBUG] Не удалось сопоставить сервис, использую: $_networkServiceName");
     } catch (e) {
-      print("[DEBUG] Ошибка поиска интерфейса: $e");
+      print("[DEBUG] Ошибка маппинга интерфейса: $e");
     }
   }
 
   @override
   void initState() {
     super.initState();
+    windowManager.addListener(this);
+    _initWindow();
     chartData = List.filled(60, 0.0, growable: true);
     
     // 1. Сначала ищем правильный интерфейс
@@ -272,7 +301,7 @@ class _HomeScreenState extends State<HomeScreen> {
       print("[DEBUG] Интерфейс определен, запускаю таймер.");
     });
 
-    // 2. Запускаем цикл
+    // 2. Запускаем цикл (только статы)
     _statsTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (isConnected) {
         _updateRealStats();
@@ -290,47 +319,82 @@ class _HomeScreenState extends State<HomeScreen> {
             });
          }
       }
-      // === FIREBASE: СЛУШАЕМ ВХОД ===
-      FirebaseAuth.instance.authStateChanges().listen((user) {
+    });
+
+    // === FIREBASE: СЛУШАЕМ ВХОД ===
+    FirebaseAuth.instance.authStateChanges().listen((user) {
       if (mounted) {
         setState(() => _currentUser = user);
         if (user != null) {
-          _fetchSubscription(user.uid); // <-- ЗАГРУЖАЕМ ПОДПИСКУ
+          Future.delayed(const Duration(seconds: 1), () => _fetchSubscription(user.uid));
         } else {
           setState(() {
-            _isPremium = false; // Сбрасываем при выходе
+            _isPremium = false;
             _expiryDate = "-";
           });
         }
       }
     });
-    });
+
+    // Настройка Firestore
+    FirebaseFirestore.instance.settings = const Settings(
+      persistenceEnabled: true,
+      cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+    );
+  }
+
+  void _initWindow() async {
+    await windowManager.setPreventClose(true);
+  }
+
+  @override
+  void onWindowClose() async {
+    bool isPreventClose = await windowManager.isPreventClose();
+    if (isPreventClose) {
+      if (isConnected) {
+        setState(() => statusText = "DISCONNECTING...");
+        await _stopVpn();
+      }
+      await windowManager.setPreventClose(false);
+      await windowManager.close();
+    }
   }
 
   Future<void> _fetchSubscription(String uid) async {
-    try {
-      final doc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      if (doc.exists && doc.data() != null) {
-        final data = doc.data()!;
-        setState(() {
-          _isPremium = data['isPremium'] ?? false;
-          
-          // Парсим дату (subscriptionExpiry: 1773148594136)
-          int expiryMs = data['subscriptionExpiry'] ?? 0;
-          if (expiryMs > 0) {
-            final date = DateTime.fromMillisecondsSinceEpoch(expiryMs);
-            _expiryDate = DateFormat('dd MMM yyyy').format(date); // Нужен пакет intl
+    int retries = 3;
+    while (retries > 0) {
+      try {
+        final doc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .get(const GetOptions(source: Source.serverAndCache));
+            
+        if (doc.exists && doc.data() != null) {
+          final data = doc.data()!;
+          if (mounted) {
+            setState(() {
+              _isPremium = data['isPremium'] ?? false;
+              int expiryMs = data['subscriptionExpiry'] ?? 0;
+              if (expiryMs > 0) {
+                final date = DateTime.fromMillisecondsSinceEpoch(expiryMs);
+                _expiryDate = DateFormat('dd MMM yyyy').format(date);
+              }
+            });
           }
-        });
+        }
+        break; // Успешно выходим из цикла
+      } catch (e) {
+        retries--;
+        print("Firestore fetch retry ($retries left): $e");
+        if (retries > 0) await Future.delayed(const Duration(seconds: 2));
       }
-    } catch (e) {
-      print("Ошибка загрузки подписки: $e");
     }
   }
 
   @override
   void dispose() {
-    _statsTimer?.cancel(); // <--- Добавь отмену таймера
+    windowManager.removeListener(this);
+    _statsTimer?.cancel();
     _stopVpn(); 
     super.dispose();
   }
@@ -351,7 +415,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // 2. Поделиться
   void _shareApp() {
-    Clipboard.setData(const ClipboardData(text: "Download PULSE VPN: https://pulsevpn.app"));
+    Clipboard.setData(const ClipboardData(text: "Download PULSE VPN: https://pulsevpn.shop"));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text("Link copied to clipboard!", style: TextStyle(color: Colors.black)),
@@ -375,7 +439,7 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             const Icon(Icons.bolt, size: 50, color: Color(0xFF00FF88)),
             const SizedBox(height: 20),
-            const Text("PULSE VPN v1.0", style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
+            const Text("PULSE VPN v0.01 beta", style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
             const SizedBox(height: 20),
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Close")),
           ],
@@ -465,7 +529,19 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() {
         isConnected = true;
         statusText = "SECURED";
+        _connectionStartTime = DateTime.now();
       });
+
+      // ЛИМИТ 1 ЧАС ДЛЯ FREE:
+      if (!_isPremium) {
+        _limitTimer?.cancel();
+        _limitTimer = Timer(const Duration(hours: 1), () {
+          if (mounted && isConnected) {
+            _stopVpn();
+            _showError("Free session expired. Please reconnect.");
+          }
+        });
+      }
 
     } catch (e) {
       print("[CRITICAL ERROR]: $e");
@@ -486,8 +562,8 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } 
     else if (Platform.isMacOS) {
-      const interface = 'Wi-Fi'; // или Автоопределение
       if (enable) {
+        String interface = _networkServiceName; 
         await Process.run('networksetup', ['-setwebproxy', interface, '127.0.0.1', '10809']);
         await Process.run('networksetup', ['-setwebproxystate', interface, 'on']);
         await Process.run('networksetup', ['-setsecurewebproxy', interface, '127.0.0.1', '10809']);
@@ -495,9 +571,18 @@ class _HomeScreenState extends State<HomeScreen> {
         await Process.run('networksetup', ['-setsocksfirewallproxy', interface, '127.0.0.1', '10808']);
         await Process.run('networksetup', ['-setsocksfirewallproxystate', interface, 'on']);
       } else {
-        await Process.run('networksetup', ['-setwebproxystate', interface, 'off']);
-        await Process.run('networksetup', ['-setsecurewebproxystate', interface, 'off']);
-        await Process.run('networksetup', ['-setsocksfirewallproxystate', interface, 'off']);
+        // Nuclear Cleanup: Выключаем прокси на ВСЕХ активных сервисах
+        try {
+          final res = await Process.run('networksetup', ['-listallnetworkservices']);
+          final services = res.stdout.toString().split('\n');
+          for (var s in services) {
+            final service = s.trim();
+            if (service.isEmpty || service.startsWith('*')) continue;
+            await Process.run('networksetup', ['-setwebproxystate', service, 'off']);
+            await Process.run('networksetup', ['-setsecurewebproxystate', service, 'off']);
+            await Process.run('networksetup', ['-setsocksfirewallproxystate', service, 'off']);
+          }
+        } catch (_) {}
       }
     }
   }
@@ -515,6 +600,11 @@ class _HomeScreenState extends State<HomeScreen> {
       await Process.run('killall', ['xray']);
     }
 
+    _limitTimer?.cancel();
+    _limitTimer = null;
+    _connectionStartTime = null;
+
+    if (!mounted) return;
     setState(() {
       isConnected = false;
       statusText = "TAP TO CONNECT";
@@ -523,59 +613,56 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Вход
   Future<void> _login() async {
+    setState(() => _isLoading = true);
     try {
       await FirebaseAuth.instance.signInWithEmailAndPassword(
         email: _emailController.text.trim(),
         password: _passController.text.trim(),
       );
+      if (mounted && Navigator.canPop(context)) {
+        Navigator.pop(context);
+      }
     } on FirebaseAuthException catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Login Error: ${e.message}"), backgroundColor: Colors.red));
+      _showError("Ошибка входа: ${e.message}");
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _register() async {
-    // 1. Проверка паролей
     if (_passController.text != _confirmPassController.text) {
       _showError("Passwords do not match!");
       return;
     }
-    
-    // 2. Проверка сложности (опционально)
     if (_passwordStrength < 0.5) {
       _showError("Password is too weak");
       return;
     }
-
+    setState(() => _isLoading = true);
     try {
-      // 3. Создаем юзера
       UserCredential cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
         email: _emailController.text.trim(),
         password: _passController.text.trim(),
       );
-
-      // 4. Отправляем письмо подтверждения
       if (cred.user != null && !cred.user!.emailVerified) {
         await cred.user!.sendEmailVerification();
-        
-        // Сразу выходим, чтобы заставить юзера войти заново после клика по ссылке
         await FirebaseAuth.instance.signOut();
-        
-        // Показываем сообщение
         if (mounted) {
-          Navigator.pop(context); // Закрываем диалог
+          if (Navigator.canPop(context)) Navigator.pop(context);
           showDialog(
             context: context,
             builder: (ctx) => AlertDialog(
-              backgroundColor: const Color(0xFF1E1E2E),
-              title: const Text("Verification Sent", style: TextStyle(color: Colors.white)),
+              backgroundColor: const Color(0xFF1A1A2E),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+              title: const Text("Email подтверждение", style: TextStyle(color: Colors.white)),
               content: Text(
-                "We sent a verification link to ${_emailController.text}.\nPlease check your email and login again.",
+                "Письмо отправлено на ${_emailController.text}.\nПерейдите по ссылке и зайдите снова.",
                 style: const TextStyle(color: Colors.white70),
               ),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(ctx),
-                  child: const Text("OK", style: TextStyle(color: Color(0xFF00FF88))),
+                  child: const Text("OK", style: TextStyle(color: Color(0xFF8B5CF6))),
                 )
               ],
             ),
@@ -583,17 +670,71 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
     } on FirebaseAuthException catch (e) {
-      _showError("Registration Error: ${e.message}");
+      _showError("Ошибка: ${e.message}");
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _signOut() async {
     await FirebaseAuth.instance.signOut();
     if (isConnected) _stopVpn();
-    
-    // Сброс контроллеров
     _emailController.clear();
     _passController.clear();
+  }
+
+  // === ОПЛАТА ЮКАССА ===
+  // plans: 'monthly' (200₽), 'quarterly' (500₽), 'yearly' (1490₽)
+  Future<void> _startPayment(String plan) async {
+    if (_currentUser == null) {
+      _showLoginDialog();
+      return;
+    }
+    setState(() => _isLoading = true);
+    try {
+      final uid = _currentUser!.uid;
+      int amount = 0;
+      if (plan == 'monthly') amount = 200;
+      else if (plan == 'quarterly') amount = 500;
+      else if (plan == 'yearly') amount = 1490;
+
+      // POST на сервер оплаты
+      final response = await http.post(
+        Uri.parse('$_paymentServerUrl/create-payment'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'amount': amount, 'userId': uid, 'method': 'bank_card'}),
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final paymentUrl = data['confirmation_url'] as String?;
+        if (paymentUrl != null && mounted) {
+          // Закрываем диалог и открываем страницу оплаты в браузере
+          if (Navigator.canPop(context)) Navigator.pop(context);
+          await launchUrl(Uri.parse(paymentUrl), mode: LaunchMode.externalApplication);
+          // Показываем сообщение чтобы юзер знал о прю обновлении
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('После оплаты вернитесь — подписка активируется автоматически ✨'),
+                backgroundColor: Color(0xFF8B5CF6),
+                behavior: SnackBarBehavior.floating,
+                duration: Duration(seconds: 5),
+              ),
+            );
+          }
+        } else {
+          _showError('Сервер не вернул ссылку оплаты');
+        }
+      } else {
+        _showError('Ошибка сервера: ${response.statusCode}');
+      }
+    } catch (e) {
+      _showError('Нет связи с сервером оплаты');
+      print('[Payment Error] $e');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   // Хелпер для ошибок
@@ -606,42 +747,80 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          image: DecorationImage(
-            image: AssetImage("assets/bg_nature.png"), // Убедись, что картинка есть
-            fit: BoxFit.cover,
-            opacity: 0.5, // Затемняем фон, чтобы текст читался
+      body: AnimatedOpacity(
+        duration: const Duration(milliseconds: 300),
+        opacity: _appOpacity,
+        child: Container(
+          decoration: const BoxDecoration(
+            // Градиентный фон в стиле iOS 26 Liquid Glass
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color(0xFF0D0D1A),
+                Color(0xFF1A0D2E),
+                Color(0xFF0D1A2E),
+                Color(0xFF0A0A14),
+              ],
+              stops: [0.0, 0.35, 0.65, 1.0],
+            ),
           ),
-          color: Color(0xFF1E1E2E), // Подложка, если картинка не загрузится
-        ),
-        child: Column(
-          children: [
-            // Твоя верхняя панель (TitleBar)
-            _buildTitleBar(), 
-
-            // Основная рабочая область
-            Expanded(
-              child: Row(
+          child: Stack(
+            children: [
+              // Цветные ореолы на фоне
+              Positioned(top: -80, left: -60, child: _bgOrb(const Color(0xFF8B5CF6), 280)),
+              Positioned(bottom: -60, right: -40, child: _bgOrb(const Color(0xFF06B6D4), 240)),
+              Positioned(top: 200, right: 100, child: _bgOrb(const Color(0xFF6D28D9), 160)),
+              // Само приложение
+              Column(
                 children: [
-                  // СЛЕВА: Сайдбар (Меню)
-                  _buildSidebar(),
-
-                  // СПРАВА: Меняющийся контент
+                  _buildTitleBar(),
                   Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24.0),
-                      // Анимация при смене вкладок
-                      child: AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 200),
-                        child: _getCurrentPage(), 
-                      ),
+                    child: Row(
+                      children: [
+                        _buildSidebar(),
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.all(24.0),
+                            child: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 350),
+                              switchInCurve: Curves.easeOutCubic,
+                              switchOutCurve: Curves.easeInCubic,
+                              transitionBuilder: (Widget child, Animation<double> animation) {
+                                return FadeTransition(
+                                  opacity: animation,
+                                  child: ScaleTransition(
+                                    scale: Tween<double>(begin: 0.95, end: 1.0).animate(animation),
+                                    child: child,
+                                  ),
+                                );
+                              },
+                              child: _getCurrentPage(),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
-            ),
-          ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+
+  // Цветной ореол для эффекта свечения на фоне
+  Widget _bgOrb(Color color, double size) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: RadialGradient(
+          colors: [color.withOpacity(0.35), color.withOpacity(0.0)],
         ),
       ),
     );
@@ -650,15 +829,18 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _getCurrentPage() {
     switch (_selectedIndex) {
       case 0:
-        return _buildDashboard(); // Твой старый дашборд (кнопка + график)
+        return KeyedSubtree(key: const ValueKey('dashboard'), child: _buildDashboard());
       case 1:
-        return const Center(child: Text("Servers List (Coming Soon)", style: TextStyle(color: Colors.white, fontSize: 20)));
+        return const Center(
+          key: ValueKey('servers'),
+          child: Text("Servers List (Coming Soon)", style: TextStyle(color: Colors.white, fontSize: 20)),
+        );
       case 2:
-        return _buildSettingsView(); // НОВОЕ: Настройки
+        return KeyedSubtree(key: const ValueKey('settings'), child: _buildSettingsView());
       case 3:
-        return _buildProfileView();  // НОВОЕ: Профиль
+        return KeyedSubtree(key: const ValueKey('profile'), child: _buildProfileView());
       default:
-        return _buildDashboard();
+        return KeyedSubtree(key: const ValueKey('dashboard_default'), child: _buildDashboard());
     }
   }
 
@@ -672,12 +854,10 @@ class _HomeScreenState extends State<HomeScreen> {
         height: 40,
         color: Colors.transparent,
         padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Row(
+        child: const Row(
           children: [
-            const Text("PULSE VPN", style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.5, color: Colors.white70)),
-            const Spacer(),
-            IconButton(icon: const Icon(Icons.minimize, size: 16, color: Colors.white54), onPressed: () => windowManager.minimize()),
-            IconButton(icon: const Icon(Icons.close, size: 16, color: Colors.redAccent), onPressed: () { _stopVpn(); windowManager.close(); }),
+            Text("PULSE VPN", style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.5, color: Colors.white70)),
+            Spacer(),
           ],
         ),
       ),
@@ -686,14 +866,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // 2. Боковое меню
   Widget _buildSidebar() {
-    return Container(
+    return GlassmorphicContainer(
       width: 80, // Узкая полоска слева
       margin: const EdgeInsets.only(bottom: 20, left: 20),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.05),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withOpacity(0.1)),
-      ),
+      blur: 20,
+      opacity: 0.05,
+      borderRadius: 20,
+      borderColor: Colors.white.withOpacity(0.1),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
@@ -716,11 +895,18 @@ class _HomeScreenState extends State<HomeScreen> {
         margin: const EdgeInsets.symmetric(vertical: 10),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: isActive ? const Color(0xFF00E5FF) : Colors.transparent,
+          color: isActive ? Colors.white.withOpacity(0.15) : Colors.transparent,
           borderRadius: BorderRadius.circular(14),
-          boxShadow: isActive ? [BoxShadow(color: const Color(0xFF00E5FF).withOpacity(0.4), blurRadius: 10)] : [],
+          border: isActive ? Border.all(color: Colors.white.withOpacity(0.2), width: 1.0) : null,
+          boxShadow: isActive ? [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.1),
+              blurRadius: 10,
+              spreadRadius: 2,
+            )
+          ] : [],
         ),
-        child: Icon(icon, color: isActive ? Colors.black : Colors.white54, size: 26),
+        child: Icon(icon, color: isActive ? Colors.white : Colors.white54, size: 26),
       ),
     );
   }
@@ -735,7 +921,6 @@ class _HomeScreenState extends State<HomeScreen> {
           height: 80,
           child: Row(
             children: [
-              // Передаем dlSpeed, ulSpeed, ping
               Expanded(child: _statCard("DOWNLOAD", dlSpeed, "Mb/s", Icons.arrow_downward_rounded, const Color(0xFF00FF88))),
               const SizedBox(width: 15),
               Expanded(child: _statCard("UPLOAD", ulSpeed, "Mb/s", Icons.arrow_upward_rounded, const Color(0xFFFFAA00))),
@@ -757,42 +942,124 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    GestureDetector(
-                      onTap: _toggleVpn,
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 500),
-                        width: 180, height: 180,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          gradient: LinearGradient(
-                            colors: isConnected 
-                              ? [const Color(0xFF00E5FF), const Color(0xFF007A99)] 
-                              : [const Color(0xFF2B3040), const Color(0xFF1B1E28)],
-                            begin: Alignment.topLeft, end: Alignment.bottomRight,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: (isConnected ? const Color(0xFF00E5FF) : Colors.black).withOpacity(isConnected ? 0.4 : 0.2),
-                              blurRadius: isConnected ? 40 : 20,
-                              spreadRadius: isConnected ? 2 : 0
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Column(
+                        children: [
+                          // Кнопка в унифицированном стиле Liquid Glass
+                          GestureDetector(
+                            onTap: _toggleVpn,
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                // 1. Плавное пульсирующее и затухающее свечение (Coordinated Glow)
+                                AnimatedOpacity(
+                                  duration: const Duration(milliseconds: 1000),
+                                  opacity: isConnected ? 1.0 : 0.0,
+                                  child: TweenAnimationBuilder<double>(
+                                    tween: Tween(begin: 0.0, end: 1.0),
+                                    duration: const Duration(seconds: 2),
+                                    curve: Curves.easeInOutSine,
+                                    builder: (context, value, child) {
+                                      double breathe = isConnected ? (0.8 + (value * 0.4)) : 1.0;
+                                      return Container(
+                                        width: 210 * breathe,
+                                        height: 210 * breathe,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          gradient: RadialGradient(
+                                            colors: [
+                                              const Color(0xFF00E5FF).withOpacity(0.2 * (1.0 - (value * 0.3))),
+                                              const Color(0xFF00E5FF).withOpacity(0.0),
+                                            ],
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+
+                                // 2. Тело кнопки
+                                AnimatedContainer(
+                                  duration: const Duration(milliseconds: 600),
+                                  width: 170, height: 170,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: Colors.white.withOpacity(isConnected ? 0.25 : 0.1), 
+                                      width: 1.0
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.2),
+                                        blurRadius: 20,
+                                        offset: const Offset(0, 10),
+                                      ),
+                                    ],
+                                  ),
+                                  child: ClipOval(
+                                    child: Stack(
+                                      alignment: Alignment.center,
+                                      children: [
+                                        BackdropFilter(
+                                          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                                          child: Container(
+                                            color: Colors.white.withOpacity(isConnected ? 0.1 : 0.05),
+                                          ),
+                                        ),
+                                        Column(
+                                          mainAxisAlignment: MainAxisAlignment.center,
+                                          children: [
+                                            Icon(
+                                              Icons.power_settings_new_rounded, 
+                                              size: 65, 
+                                              color: isConnected ? Colors.white : Colors.white24,
+                                            ),
+                                            if (isConnected)
+                                              const Padding(
+                                                padding: EdgeInsets.only(top: 8),
+                                                child: Text(
+                                                  "STOP",
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.bold,
+                                                    letterSpacing: 2,
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
-                          ]
-                        ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.power_settings_new_rounded, size: 70, color: isConnected ? Colors.white : Colors.white24),
-                            if (isConnected) 
-                              const Text("STOP", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold, height: 2))
-                          ],
-                        ),
+                          ),
+                          const SizedBox(height: 15),
+                          Text(
+                            isConnected ? "CONNECTION ACTIVE" : "DISCONNECTED", 
+                            style: TextStyle(
+                              color: isConnected ? const Color(0xFF00E5FF) : Colors.white24, 
+                              letterSpacing: 2, 
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                            )
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            isConnected ? _formatTime(_secondsActive) : "TAP TO CONNECT", 
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(isConnected ? 0.5 : 0.1), 
+                              fontSize: 13, 
+                              fontFamily: "Menlo",
+                              letterSpacing: 1.5,
+                            )
+                          )
+                        ],
                       ),
                     ),
-                    const SizedBox(height: 20),
-                    Text(isConnected ? "VPN ACTIVE" : "DISCONNECTED", 
-                      style: TextStyle(color: isConnected ? const Color(0xFF00E5FF) : Colors.grey, letterSpacing: 2, fontWeight: FontWeight.bold)),
-                    Text(isConnected ? _formatTime(_secondsActive) : "--:--:--", 
-                      style: const TextStyle(color: Colors.white54, fontSize: 14, fontFamily: "Courier"))
                   ],
                 ),
               ),
@@ -802,13 +1069,11 @@ class _HomeScreenState extends State<HomeScreen> {
               // ПРАВАЯ ЧАСТЬ: ГРАФИК (Занимает 60% ширины)
               Expanded(
                 flex: 3,
-                child: Container(
+                child: GlassmorphicContainer(
+                  blur: 20,
+                  opacity: 0.05,
+                  borderRadius: 24,
                   padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.02),
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(color: Colors.white.withOpacity(0.05)),
-                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -846,14 +1111,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Виджет карточки статистики (Стекло)
   Widget _statCard(String title, String value, String unit, IconData icon, Color color) {
-    return Container(
-      // Убрали padding vertical, чтобы не съедать место
+    return GlassmorphicContainer(
+      blur: 20,
+      opacity: 0.05,
+      borderRadius: 16,
       padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.03),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(0.05)),
-      ),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center, // Центрируем по вертикали
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -891,14 +1153,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Виджет нижней панели (Вместо просто линии)
   Widget _buildConnectionDetails() {
-    return Container(
-      margin: const EdgeInsets.only(top: 20),
+    return GlassmorphicContainer(
+      blur: 20,
+      opacity: 0.1,
+      borderRadius: 24,
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: const Color(0xFF15151F), // Чуть темнее фона
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Colors.white.withOpacity(0.05)),
-      ),
+      margin: const EdgeInsets.only(top: 20),
+      borderColor: Colors.white.withOpacity(0.1),
       child: Row(
         children: [
           // Флаг и Страна
@@ -957,12 +1218,14 @@ class _HomeScreenState extends State<HomeScreen> {
         const SizedBox(height: 10),
         
         _glassBox(
-          child: SwitchListTile(
+          child: ListTile(
             title: const Text("Kill Switch", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
             subtitle: const Text("Block internet if VPN drops", style: TextStyle(color: Colors.white54, fontSize: 11)),
-            value: _killSwitch,
-            activeColor: const Color(0xFF00E5FF),
-            onChanged: (val) => setState(() => _killSwitch = val),
+            trailing: CupertinoSwitch(
+              activeColor: const Color(0xFF00E5FF),
+              value: _killSwitch,
+              onChanged: (val) => setState(() => _killSwitch = val),
+            ),
           )
         ),
         const SizedBox(height: 15),
@@ -982,18 +1245,22 @@ class _HomeScreenState extends State<HomeScreen> {
         _glassBox(
           child: Column(
             children: [
-              SwitchListTile(
+              ListTile(
                 title: const Text("Notifications", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                value: _notifications,
-                activeColor: const Color(0xFF00E5FF),
-                onChanged: (val) => setState(() => _notifications = val),
+                trailing: CupertinoSwitch(
+                  activeColor: const Color(0xFF00E5FF),
+                  value: _notifications,
+                  onChanged: (val) => setState(() => _notifications = val),
+                ),
               ),
               Divider(color: Colors.white.withOpacity(0.1), height: 1),
-              SwitchListTile(
+              ListTile(
                 title: const Text("Dark Mode", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                value: _darkMode,
-                activeColor: const Color(0xFF00E5FF),
-                onChanged: (val) => setState(() => _darkMode = val),
+                trailing: CupertinoSwitch(
+                  activeColor: const Color(0xFF00E5FF),
+                  value: _darkMode,
+                  onChanged: (val) => setState(() => _darkMode = val),
+                ),
               ),
             ],
           )
@@ -1120,9 +1387,9 @@ class _HomeScreenState extends State<HomeScreen> {
         _glassBox(
           child: Column(
             children: [
-              _profileItem(Icons.send_rounded, "Telegram Channel", () => _openUrl("https://t.me/durov")),
+              _profileItem(Icons.send_rounded, "Telegram Channel", () => _openUrl("https://t.me/PulseVPNForum")),
               Divider(color: Colors.white.withOpacity(0.1), height: 1),
-              _profileItem(Icons.star, "Rate Application", () => _openUrl("https://apple.com")),
+              _profileItem(Icons.star, "Rate Application", () => _openUrl("https://pulsevpn.shop")),
               Divider(color: Colors.white.withOpacity(0.1), height: 1),
               _profileItem(Icons.share, "Share with Friends", _shareApp),
             ],
@@ -1138,221 +1405,283 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // === 2. ДИАЛОГ ВХОДА (Всплывающее окно) ===
+  // === 2. ДИАЛОГ ВХОДА — Liquid Glass ===
   void _showLoginDialog() {
-    // Сбрасываем поля при открытии
     _emailController.clear();
     _passController.clear();
     _confirmPassController.clear();
     _passwordStrength = 0.0;
-    _isLoginMode = true; // По умолчанию вход
+    _isLoginMode = true;
 
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (context, setDialogState) {
+          final inputDecoration = (String hint, IconData icon) => InputDecoration(
+            hintText: hint,
+            hintStyle: TextStyle(color: Colors.white.withOpacity(0.4)),
+            filled: true,
+            fillColor: Colors.white.withOpacity(0.07),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: BorderSide(color: Colors.white.withOpacity(0.12)),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: Color(0xFF8B5CF6), width: 1.5),
+            ),
+            prefixIcon: Icon(icon, color: Colors.white38, size: 20),
+          );
+
           return Dialog(
             backgroundColor: Colors.transparent,
-            child: Container(
-              width: 380, // Чуть шире для новых полей
-              padding: const EdgeInsets.all(30),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E1E2E).withOpacity(0.98),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: Colors.white10),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(_isLoginMode ? Icons.lock_person : Icons.person_add, size: 50, color: const Color(0xFF00E5FF)),
-                  const SizedBox(height: 20),
-                  Text(_isLoginMode ? "Welcome Back" : "Create Account", style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 20),
-                  
-                  // EMAIL
-                  TextField(
-                    controller: _emailController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      hintText: "Email", hintStyle: TextStyle(color: Colors.white.withOpacity(0.5)),
-                      filled: true, fillColor: Colors.black26,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                      prefixIcon: const Icon(Icons.email, color: Colors.white54),
-                    ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(28),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+                child: Container(
+                  width: 380,
+                  padding: const EdgeInsets.all(32),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(28),
+                    border: Border.all(color: Colors.white.withOpacity(0.16)),
                   ),
-                  const SizedBox(height: 10),
-                  
-                  // PASSWORD
-                  TextField(
-                    controller: _passController,
-                    obscureText: true,
-                    onChanged: (val) {
-                      // Обновляем силу пароля (только при регистрации)
-                      if (!_isLoginMode) {
-                        _checkPasswordStrength(val);
-                        setDialogState(() {}); // Обновляем UI диалога
-                      }
-                    },
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      hintText: "Password", hintStyle: TextStyle(color: Colors.white.withOpacity(0.5)),
-                      filled: true, fillColor: Colors.black26,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                      prefixIcon: const Icon(Icons.key, color: Colors.white54),
-                    ),
-                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Иконка
+                      Container(
+                        width: 60, height: 60,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF8B5CF6), Color(0xFF06B6D4)],
+                          ),
+                        ),
+                        child: Icon(
+                          _isLoginMode ? Icons.lock_person_rounded : Icons.person_add_rounded,
+                          color: Colors.white, size: 28,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        _isLoginMode ? "С возвращением" : "Создать аккаунт",
+                        style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 24),
 
-                  // === ТОЛЬКО ПРИ РЕГИСТРАЦИИ ===
-                  if (!_isLoginMode) ...[
-                    const SizedBox(height: 5),
-                    // Шкала сложности
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(2),
-                      child: LinearProgressIndicator(
-                        value: _passwordStrength,
-                        backgroundColor: Colors.white10,
-                        // Цвет меняется: Красный -> Желтый -> Зеленый
-                        color: _passwordStrength < 0.3 ? Colors.red : (_passwordStrength < 0.7 ? Colors.orange : Colors.green),
-                        minHeight: 4,
+                      // EMAIL
+                      TextField(
+                        controller: _emailController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: inputDecoration("Email", Icons.email_rounded),
                       ),
-                    ),
-                    const SizedBox(height: 10),
-                    
-                    // CONFIRM PASSWORD
-                    TextField(
-                      controller: _confirmPassController,
-                      obscureText: true,
-                      style: const TextStyle(color: Colors.white),
-                      decoration: InputDecoration(
-                        hintText: "Confirm Password", hintStyle: TextStyle(color: Colors.white.withOpacity(0.5)),
-                        filled: true, fillColor: Colors.black26,
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                        prefixIcon: const Icon(Icons.lock_reset, color: Colors.white54),
-                      ),
-                    ),
-                  ],
+                      const SizedBox(height: 12),
 
-                  const SizedBox(height: 20),
-                  
-                  // КНОПКА
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: () {
-                        if (_isLoginMode) {
-                          Navigator.pop(ctx);
-                          _login();
-                        } else {
-                          // Регистрацию вызываем БЕЗ закрытия окна (оно закроется само при успехе)
-                          _register().then((_) {
-                             // Если ошибок не было, диалог закроется внутри _register
-                          }); 
-                        }
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF00E5FF), 
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))
+                      // PASSWORD
+                      TextField(
+                        controller: _passController,
+                        obscureText: true,
+                        onChanged: (val) {
+                          if (!_isLoginMode) {
+                            _checkPasswordStrength(val);
+                            setDialogState(() {});
+                          }
+                        },
+                        style: const TextStyle(color: Colors.white),
+                        decoration: inputDecoration("Пароль", Icons.key_rounded),
                       ),
-                      child: Text(_isLoginMode ? "LOGIN" : "REGISTER", style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-                    ),
+
+                      if (!_isLoginMode) ...[
+                        const SizedBox(height: 6),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(3),
+                          child: LinearProgressIndicator(
+                            value: _passwordStrength,
+                            backgroundColor: Colors.white10,
+                            color: _passwordStrength < 0.3 ? Colors.red : (_passwordStrength < 0.7 ? Colors.orange : const Color(0xFF34D399)),
+                            minHeight: 4,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: _confirmPassController,
+                          obscureText: true,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: inputDecoration("Подтвердите пароль", Icons.lock_reset_rounded),
+                        ),
+                      ],
+
+                      const SizedBox(height: 24),
+
+                      // КНОПКА
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: _isLoading ? null : () {
+                            if (_isLoginMode) {
+                              _login();
+                            } else {
+                              _register();
+                            }
+                          },
+                          style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                            backgroundColor: Colors.transparent,
+                            shadowColor: Colors.transparent,
+                          ).copyWith(
+                            backgroundColor: WidgetStateProperty.all(Colors.transparent),
+                            overlayColor: WidgetStateProperty.all(Colors.white10),
+                          ),
+                          child: Ink(
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                colors: [Color(0xFF8B5CF6), Color(0xFF06B6D4)],
+                              ),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              alignment: Alignment.center,
+                              child: _isLoading
+                                ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                                : Text(
+                                    _isLoginMode ? "ВОЙТИ" : "ЗАРЕГИСТРИРОВАТЬСЯ",
+                                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1),
+                                  ),
+                            ),
+                          ),
+                        ),
+                      ),
+
+                      const SizedBox(height: 16),
+                      GestureDetector(
+                        onTap: () => setDialogState(() => _isLoginMode = !_isLoginMode),
+                        child: Text(
+                          _isLoginMode ? "Нет аккаунта? Зарегистрироваться" : "Уже есть аккаунт? Войти",
+                          style: const TextStyle(color: Color(0xFF8B5CF6), fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ],
                   ),
-                  
-                  const SizedBox(height: 15),
-                  GestureDetector(
-                    onTap: () {
-                      setDialogState(() => _isLoginMode = !_isLoginMode);
-                    },
-                    child: Text(
-                      _isLoginMode ? "No account? Sign Up" : "Have account? Sign In",
-                      style: const TextStyle(color: Color(0xFF00E5FF), fontWeight: FontWeight.bold),
-                    ),
-                  )
-                ],
+                ),
               ),
             ),
           );
-        }
+        },
       ),
     );
   }
 
-  // === 3. ДИАЛОГ ПОКУПКИ (С ценами) ===
+
+  // Окно выбора плана с реальной оплатой
   void _showPurchaseDialog() {
     showDialog(
       context: context,
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,
-        child: Container(
-          width: 750,
-          padding: const EdgeInsets.all(30),
-          decoration: BoxDecoration(
-            color: const Color(0xFF15151F).withOpacity(0.98),
-            borderRadius: BorderRadius.circular(30),
-            border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.3)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text("Choose Your Plan", style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 10),
-              const Text("Unlock full speed, all locations & remove ads", style: TextStyle(color: Colors.white54)),
-              const SizedBox(height: 30),
-              
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(32),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+            child: Container(
+              width: 750,
+              padding: const EdgeInsets.all(30),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(32),
+                border: Border.all(color: Colors.white.withOpacity(0.18)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  _priceCard("1 Month", "200 ₽", "Standard", false),
-                  _priceCard("1 Year", "1490 ₽", "Best Value", true),
-                  _priceCard("3 Months", "500 ₽", "Popular", false),
+                  const Text("Choose Your Plan", style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Text("Разблокируйте полную скорость и все серверы", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 14)),
+                  const SizedBox(height: 30),
+                  if (_isLoading)
+                    const CircularProgressIndicator(color: Color(0xFF8B5CF6))
+                  else
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _priceCard("1 Месяц", "200 ₽", "Standard", false, "monthly"),
+                        _priceCard("3 Месяца", "500 ₽", "Popular", false, "quarterly"),
+                        _priceCard("1 Год", "1490 ₽", "Best Value", true, "yearly"),
+                      ],
+                    ),
+                  const SizedBox(height: 24),
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: Text("Позже", style: TextStyle(color: Colors.white.withOpacity(0.3))),
+                  )
                 ],
               ),
-              
-              const SizedBox(height: 30),
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text("Maybe later", style: TextStyle(color: Colors.white30)),
-              )
-            ],
+            ),
           ),
         ),
       ),
     );
   }
 
-  // Виджет карточки цены
-  Widget _priceCard(String period, String price, String label, bool isBest) {
-    return Container(
-      width: 180,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: isBest ? const Color(0xFF00FF88).withOpacity(0.1) : Colors.white.withOpacity(0.05),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: isBest ? const Color(0xFF00FF88) : Colors.white10, 
-          width: isBest ? 2 : 1
-        ),
-      ),
-      child: Column(
-        children: [
-          Text(label, style: TextStyle(color: isBest ? const Color(0xFF00FF88) : Colors.white54, fontSize: 12, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 15),
-          Text(price, style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.bold)),
-          Text(period, style: const TextStyle(color: Colors.white70)),
-          const SizedBox(height: 20),
-          ElevatedButton(
-            onPressed: () {
-              print("User selected $period");
-              // Тут будет логика оплаты
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: isBest ? const Color(0xFF00FF88) : Colors.white10,
-              foregroundColor: isBest ? Colors.black : Colors.white,
-              elevation: 0,
+  // Карточка тарифа с реальной оплатой
+  Widget _priceCard(String period, String price, String label, bool isBest, String planId) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          width: 180,
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: isBest
+                ? const Color(0xFF8B5CF6).withOpacity(0.25)
+                : Colors.white.withOpacity(0.07),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: isBest ? const Color(0xFF8B5CF6) : Colors.white.withOpacity(0.12),
+              width: isBest ? 2 : 1,
             ),
-            child: const Text("Select"),
-          )
-        ],
+            boxShadow: isBest ? [
+              BoxShadow(color: const Color(0xFF8B5CF6).withOpacity(0.3), blurRadius: 20)
+            ] : [],
+          ),
+          child: Column(
+            children: [
+              if (isBest)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF8B5CF6),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Text("Лучший выбор", style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                )
+              else
+                Text(label, style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 15),
+              Text(price, style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.bold)),
+              Text(period, style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 13)),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => _startPayment(planId),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: isBest ? const Color(0xFF8B5CF6) : Colors.white.withOpacity(0.12),
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  child: const Text("Оплатить", style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              )
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1368,16 +1697,22 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
 
-  // Стиль "Стекла" для карточек
+  // Liquid Glass эффект: настоящее матовое стекло с размытием
   Widget _glassBox({required Widget child, EdgeInsetsGeometry? padding}) {
-    return Container(
-      padding: padding,
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.06),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withOpacity(0.05)),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(22),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Container(
+          padding: padding,
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.07),
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: Colors.white.withOpacity(0.14)),
+          ),
+          child: child,
+        ),
       ),
-      child: child,
     );
   }
 
@@ -1726,4 +2061,65 @@ class BigChartPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant BigChartPainter oldDelegate) => true;
+}
+
+// === GLASSMORPHIC UI COMPONENTS ===
+
+class GlassmorphicContainer extends StatelessWidget {
+  final double blur;
+  final double opacity;
+  final double? width;
+  final double? height;
+  final Widget child;
+  final double borderRadius;
+  final EdgeInsetsGeometry? padding;
+  final EdgeInsetsGeometry? margin;
+  final Color? borderColor;
+
+  const GlassmorphicContainer({
+    super.key,
+    required this.blur,
+    required this.opacity,
+    this.width,
+    this.height,
+    required this.child,
+    this.borderRadius = 25.0,
+    this.padding,
+    this.margin,
+    this.borderColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: width,
+      height: height,
+      margin: margin,
+      decoration: BoxDecoration(
+        color: Color.fromRGBO(255, 255, 255, opacity),
+        borderRadius: BorderRadius.all(Radius.circular(borderRadius)),
+        border: Border.all(color: borderColor ?? Colors.white.withOpacity(0.2), width: 2.0),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 20,
+            spreadRadius: 5,
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(borderRadius),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
+              child: Container(),
+            ),
+            Container(padding: padding, child: child),
+          ],
+        ),
+      ),
+    );
+  }
 }
