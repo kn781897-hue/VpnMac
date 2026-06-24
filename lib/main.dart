@@ -72,7 +72,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   bool _darkMode = true;
   bool _notifications = true;
   
-  // === ПЕРЕМЕННЫЕ ДЛЯ РЕАЛЬНОЙ СТАТИСТИКИ ===
+
   Timer? _statsTimer;
   Timer? _limitTimer;
   DateTime? _connectionStartTime;
@@ -87,16 +87,16 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   String ping = "-";
   List<double> chartData = List.filled(60, 0.0, growable: true);
 
-  // ПЕРЕМЕННЫЕ ДЛЯ ПЛАВНОСТИ
+  // плавность
   double _smoothDl = 0.0;
   double _smoothUl = 0.0;
 
-  // === FIREBASE: ПЕРЕМЕННЫЕ ===
+  // firebase
   final _emailController = TextEditingController();
   final _passController = TextEditingController();
   User? _currentUser;
 
-  // === ДАННЫЕ ПОДПИСКИ ===
+  // подписки
   bool _isPremium = false;
   String _expiryDate = "-";
   bool _isLoginMode = true;
@@ -104,11 +104,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   double _passwordStrength = 0.0;
   bool _isLoading = false; // Для спиннера входа/оплаты
 
-  // === ОПЛАТА ===
+  // оплата
   // URL сервера оплаты (замените на ваш реальный путь если отличается)
   static const String _paymentServerUrl = 'http://31.58.87.8:3000';
 
-  // === ОБНОВЛЕННЫЙ КОНФИГ ПОД ВАШ СКРИНШОТ (VMess + WebSocket) ===
+  // конфиг
  final String xrayConfig = '''
 {
   "log": {
@@ -296,12 +296,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     _initWindow();
     chartData = List.filled(60, 0.0, growable: true);
     
-    // 1. Сначала ищем правильный интерфейс
     _detectActiveInterface().then((_) {
       print("[DEBUG] Интерфейс определен, запускаю таймер.");
     });
 
-    // 2. Запускаем цикл (только статы)
+
     _statsTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (isConnected) {
         _updateRealStats();
@@ -321,7 +320,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
       }
     });
 
-    // === FIREBASE: СЛУШАЕМ ВХОД ===
+    // firebase вход
     FirebaseAuth.instance.authStateChanges().listen((user) {
       if (mounted) {
         setState(() => _currentUser = user);
@@ -336,7 +335,6 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
       }
     });
 
-    // Настройка Firestore
     FirebaseFirestore.instance.settings = const Settings(
       persistenceEnabled: true,
       cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
@@ -382,7 +380,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
             });
           }
         }
-        break; // Успешно выходим из цикла
+        break; 
       } catch (e) {
         retries--;
         print("Firestore fetch retry ($retries left): $e");
@@ -399,9 +397,9 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     super.dispose();
   }
 
-  // === ЛОГИКА ПРОФИЛЯ (ВСТАВИТЬ СЮДА) ===
+  // профиль
 
-  // 1. Открытие ссылок
+  // ссылки
   Future<void> _openUrl(String url) async {
     final Uri uri = Uri.parse(url);
     try {
@@ -413,7 +411,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     }
   }
 
-  // 2. Поделиться
+  // поделиться
   void _shareApp() {
     Clipboard.setData(const ClipboardData(text: "Download PULSE VPN: https://pulsevpn.shop"));
     ScaffoldMessenger.of(context).showSnackBar(
@@ -428,7 +426,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   }
 
 
-  // 4. О программе
+  // о программе
   void _showAboutDialog() {
     showDialog(
       context: context,
@@ -457,25 +455,22 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   }
 
 
-  // --- НОВАЯ ФУНКЦИЯ ЗАПУСКА (Копирует файлы + Дает права + Запускает) ---
+  // запуск
   Future<void> _startVpn() async {
     setState(() => statusText = "INITIALIZING...");
 
     try {
-      // 1. Получаем папку Application Support (доступна в Release)
+
       final dir = await getApplicationSupportDirectory();
       final coreDir = Directory("${dir.path}/core");
-      
-      // Создаем папку, если нет
+
       if (!await coreDir.exists()) {
         await coreDir.create(recursive: true);
       }
 
       print("[DEBUG] Рабочая папка: ${coreDir.path}");
 
-      // 2. Внутренняя функция для копирования файлов
       Future<void> copyAndChmod(String filename) async {
-        // Если мы на Windows и файл xray, меняем название на xray.exe
         String targetName = filename;
         if (Platform.isWindows && filename == 'xray') {
           targetName = 'xray.exe';
@@ -485,26 +480,23 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
         final byteData = await rootBundle.load("assets/core/$targetName");
         await file.writeAsBytes(byteData.buffer.asUint8List(), flush: true);
         
-        // chmod нужен ТОЛЬКО для macOS/Linux
         if (!Platform.isWindows && filename == 'xray') {
           await Process.run('chmod', ['+x', file.path]);
           try { await Process.run('xattr', ['-d', 'com.apple.quarantine', file.path]); } catch (_) {}
         }
       }
 
-      // 3. Копируем ядро и базы
       await copyAndChmod("xray");
       await copyAndChmod("geoip.dat");
       await copyAndChmod("geosite.dat");
 
-      // 4. Создаем конфиг (берем вашу переменную xrayConfig)
       final configFile = File("${coreDir.path}/config.json");
       await configFile.writeAsString(xrayConfig);
 
-      // 5. Убиваем старые процессы
+      // Убиваем старые процессы
       await Process.run('killall', ['xray']);
 
-      // 6. ЗАПУСК ЯДРА
+      // ядро запуск
       print("[DEBUG] Запускаю Xray...");
 
       String execName = Platform.isWindows ? "xray.exe" : "xray";
@@ -519,11 +511,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
         },
       );
 
-      // Логируем вывод (для отладки)
+      // лог вывода
       _xrayProcess?.stderr.transform(utf8.decoder).listen((data) => print("[XRAY ERR]: $data"));
       _xrayProcess?.stdout.transform(utf8.decoder).listen((data) => print("[XRAY]: $data"));
 
-      // 7. Включаем системный прокси
+      // системный прокси
       await _setSystemProxy(true);
 
       setState(() {
@@ -532,7 +524,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
         _connectionStartTime = DateTime.now();
       });
 
-      // ЛИМИТ 1 ЧАС ДЛЯ FREE:
+      // лимит
       if (!_isPremium) {
         _limitTimer?.cancel();
         _limitTimer = Timer(const Duration(hours: 1), () {
@@ -553,11 +545,9 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   Future<void> _setSystemProxy(bool enable) async {
     if (Platform.isWindows) {
       if (enable) {
-        // Включаем прокси в Windows (направляем весь HTTP/HTTPS трафик на порт 10809)
         await Process.run('reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '1', '/f']);
         await Process.run('reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyServer', '/t', 'REG_SZ', '/d', '127.0.0.1:10809', '/f']);
       } else {
-        // Выключаем прокси в Windows
         await Process.run('reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '0', '/f']);
       }
     } 
@@ -571,7 +561,6 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
         await Process.run('networksetup', ['-setsocksfirewallproxy', interface, '127.0.0.1', '10808']);
         await Process.run('networksetup', ['-setsocksfirewallproxystate', interface, 'on']);
       } else {
-        // Nuclear Cleanup: Выключаем прокси на ВСЕХ активных сервисах
         try {
           final res = await Process.run('networksetup', ['-listallnetworkservices']);
           final services = res.stdout.toString().split('\n');
@@ -586,7 +575,6 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
       }
     }
   }
-  // Не забудьте обновить _stopVpn, чтобы он вызывал _setSystemProxy(false)
   Future<void> _stopVpn() async {
     await _setSystemProxy(false);
 
@@ -683,7 +671,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     _passController.clear();
   }
 
-  // === ОПЛАТА ЮКАССА ===
+  // оплпта через юкассу
   // plans: 'monthly' (200₽), 'quarterly' (500₽), 'yearly' (1490₽)
   Future<void> _startPayment(String plan) async {
     if (_currentUser == null) {
@@ -709,7 +697,6 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
         final data = jsonDecode(response.body);
         final paymentUrl = data['confirmation_url'] as String?;
         if (paymentUrl != null && mounted) {
-          // Закрываем диалог и открываем страницу оплаты в браузере
           if (Navigator.canPop(context)) Navigator.pop(context);
           await launchUrl(Uri.parse(paymentUrl), mode: LaunchMode.externalApplication);
           // Показываем сообщение чтобы юзер знал о прю обновлении
@@ -844,9 +831,6 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     }
   }
 
-  // === ВСТАВИТЬ ЭТИ МЕТОДЫ ВНУТРЬ КЛАССА ===
-
-  // 1. Верхняя полоска окна
   Widget _buildTitleBar() {
     return GestureDetector(
       onPanStart: (details) => windowManager.startDragging(),
@@ -864,7 +848,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     );
   }
 
-  // 2. Боковое меню
+  // Боковое меню
   Widget _buildSidebar() {
     return GlassmorphicContainer(
       width: 80, // Узкая полоска слева
@@ -912,11 +896,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   }
 
  
-  // 3. Правая часть (Кнопка и График)
+  // кнопка и график
   Widget _buildDashboard() {
     return Column(
       children: [
-        // 1. ВЕРХНЯЯ СТАТИСТИКА (ДИНАМИЧНАЯ)
+        // динамичная статистика
         SizedBox(
           height: 80,
           child: Row(
@@ -932,11 +916,10 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
 
         const SizedBox(height: 20),
 
-        // 2. ЦЕНТРАЛЬНАЯ ОБЛАСТЬ (Кнопка Слева + График Справа)
+        // центральная область
         Expanded(
           child: Row(
             children: [
-              // ЛЕВАЯ ЧАСТЬ: КНОПКА (Занимает 40% ширины)
               Expanded(
                 flex: 2,
                 child: Column(
@@ -946,13 +929,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                       fit: BoxFit.scaleDown,
                       child: Column(
                         children: [
-                          // Кнопка в унифицированном стиле Liquid Glass
                           GestureDetector(
                             onTap: _toggleVpn,
                             child: Stack(
                               alignment: Alignment.center,
                               children: [
-                                // 1. Плавное пульсирующее и затухающее свечение (Coordinated Glow)
                                 AnimatedOpacity(
                                   duration: const Duration(milliseconds: 1000),
                                   opacity: isConnected ? 1.0 : 0.0,
@@ -979,7 +960,6 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                                   ),
                                 ),
 
-                                // 2. Тело кнопки
                                 AnimatedContainer(
                                   duration: const Duration(milliseconds: 600),
                                   width: 170, height: 170,
@@ -1066,7 +1046,6 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
 
               const SizedBox(width: 20),
 
-              // ПРАВАЯ ЧАСТЬ: ГРАФИК (Занимает 60% ширины)
               Expanded(
                 flex: 3,
                 child: GlassmorphicContainer(
@@ -1085,7 +1064,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                         ],
                       ),
                       const Spacer(),
-                      // САМ ГРАФИК
+                      // график
                       SizedBox(
                         height: 150,
                         width: double.infinity,
@@ -1103,13 +1082,13 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
 
         const SizedBox(height: 20),
 
-        // 3. НИЖНЯЯ ПАНЕЛЬ (Оставляем вашу красивую панель)
+        // нижняя панель
         _buildConnectionDetails(), 
       ],
     );
   }
 
-  // Виджет карточки статистики (Стекло)
+  // Виджет карточки статистики
   Widget _statCard(String title, String value, String unit, IconData icon, Color color) {
     return GlassmorphicContainer(
       blur: 20,
@@ -1195,7 +1174,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
           
           const Spacer(),
           
-          // График-индикатор (Мини)
+          // График-индикатор 
           SizedBox(
             width: 80, height: 40,
             child: CustomPaint(
@@ -1207,7 +1186,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     );
   }
 
-  // === ЭКРАН НАСТРОЕК (Settings) ===
+  //экран настроек
   Widget _buildSettingsView() {
     return ListView(
       children: [
@@ -1269,7 +1248,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     );
   }
 
-  // === 1. ГЛАВНЫЙ ЭКРАН ПРОФИЛЯ ===
+  // профиль
   Widget _buildProfileView() {
     // Проверяем, вошел ли пользователь
     final bool isGuest = _currentUser == null;
@@ -1280,7 +1259,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
         const Text("Profile", style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white)),
         const SizedBox(height: 30),
 
-        // КАРТОЧКА ЮЗЕРА (Меняется в зависимости от статуса)
+        // карточка юзера
         _glassBox(
           padding: EdgeInsets.zero,
           child: InkWell(
@@ -1321,7 +1300,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
 
         const SizedBox(height: 20),
 
-        // КАРТОЧКА ПОДПИСКИ (ОКНО ОПЛАТЫ)
+        // карточка подписки
         GestureDetector(
           onTap: () {
             // Если гость нажимает на подписку -> просим войти
@@ -1383,7 +1362,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
 
         const SizedBox(height: 30),
 
-        // ДЕЙСТВИЯ (Кнопки)
+        // кнопки
         _glassBox(
           child: Column(
             children: [
@@ -1405,7 +1384,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     );
   }
 
-  // === 2. ДИАЛОГ ВХОДА — Liquid Glass ===
+  // диалог входа
   void _showLoginDialog() {
     _emailController.clear();
     _passController.clear();
@@ -1686,7 +1665,6 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     );
   }
 
-  // Обновленный метод: принимает функцию onTap
   Widget _profileItem(IconData icon, String title, VoidCallback onTap) {
     return ListTile(
       leading: Icon(icon, color: Colors.white),
@@ -1697,7 +1675,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   }
 
 
-  // Liquid Glass эффект: настоящее матовое стекло с размытием
+  // Liquid Glass
   Widget _glassBox({required Widget child, EdgeInsetsGeometry? padding}) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(22),
@@ -1716,7 +1694,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     );
   }
 
-  // Превращает секунды (125) в текст (00:02:05)
+
   String _formatTime(int seconds) {
     int h = seconds ~/ 3600;
     int m = (seconds % 3600) ~/ 60;
@@ -1727,13 +1705,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   Future<void> _updateRealStats() async {
     if (!isConnected) return;
     
-    // Обновляем таймер времени
     if (mounted) setState(() => _secondsActive++);
 
     bool dataFound = false;
 
     try {
-      // 1. ПИНГ (С таймаутом и полным путем)
       try {
         if (Platform.isWindows) {
           // Windows ping: ping -n 1 -w 1000 8.8.8.8
@@ -1744,29 +1720,24 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
             ping = pingMatch.group(1)!;
           }
         } else {
-          // MacOS ping (Твой старый код)
           final pingRes = await Process.run('/sbin/ping', ['-c', '1', '-t', '1', '8.8.8.8']);
           final pingMatch = RegExp(r'time=(\d+\.?\d*)').firstMatch(pingRes.stdout.toString());
           if (pingMatch != null) ping = double.parse(pingMatch.group(1)!).toStringAsFixed(0);
         }
       } catch (_) {}
 
-      // 2. ТРАФИК (Умный перебор интерфейсов)
-      // Сначала пробуем en0 (Wi-Fi) и en1 (кабель), так как utun (VPN) часто глючит в netstat
       List<String> interfacesToTry = ["en0", "en1"];
       
-      // Добавляем тот, что определила система, если он не utun
       if (_networkInterface.isNotEmpty && !_networkInterface.startsWith('utun')) {
         interfacesToTry.insert(0, _networkInterface);
       }
-      interfacesToTry = interfacesToTry.toSet().toList(); // Убираем дубликаты
+      interfacesToTry = interfacesToTry.toSet().toList();
 
       for (String iface in interfacesToTry) {
         if (Platform.isWindows) {
         try {
           final netRes = await Process.run('netstat', ['-e']);
           final lines = netRes.stdout.toString().split('\n');
-          // Вторая строка содержит "Байты    [Получено]    [Отправлено]"
           if (lines.length > 1) {
             final parts = lines[1].trim().split(RegExp(r'\s+'));
             if (parts.length >= 3) {
@@ -1800,7 +1771,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
               .timeout(const Duration(milliseconds: 500));
           
           final netOutput = netRes.stdout.toString().trim();
-          if (netOutput.isEmpty) continue; // Пусто -> пробуем следующий
+          if (netOutput.isEmpty) continue; // Пусто -> следующий
 
           final lines = netOutput.split('\n');
           if (lines.length > 1) {
@@ -1811,13 +1782,13 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
               int currentRx = int.tryParse(parts[6]) ?? 0;
               int currentTx = int.tryParse(parts[9]) ?? 0;
 
-              // Если нашли реальные данные (не нули)
+              // проверка на 0
               if (currentRx > 0 || currentTx > 0) {
                 
                 int diffRx = currentRx - _lastRxBytes;
                 int diffTx = currentTx - _lastTxBytes;
 
-                // Фильтр огромных скачков (при смене интерфейса или первом запуске)
+                // Фильтр огромных скачков 
                 if (diffRx < 0 || diffRx > 500000000) diffRx = 0;
                 if (diffTx < 0 || diffTx > 500000000) diffTx = 0;
 
@@ -1828,17 +1799,17 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                 double instantDl = (diffRx * 8) / 1000000;
                 double instantUl = (diffTx * 8) / 1000000;
 
-                // Плавное сглаживание (Smoothing)
+                // Плавное сглаживание
                 _smoothDl = (_smoothDl * 0.7) + (instantDl * 0.3);
                 _smoothUl = (_smoothUl * 0.7) + (instantUl * 0.3);
 
                 dataFound = true;
-                break; // Ура, данные найдены, выходим из цикла перебора
+                break; 
               }
             }
           }
         } catch (_) {
-          continue; // Ошибка с этим интерфейсом, пробуем следующий
+          continue; 
         }
       }
       }
@@ -1846,24 +1817,20 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
       print("[Stats Error] $e");
     }
 
-    // 3. ФОЛБЭК (Если реальные данные так и не нашлись - имитируем жизнь)
+    // фолбэк
     if (!dataFound) {
-      // Генерируем "живые" цифры, чтобы интерфейс не выглядел сломанным
       double randomDl = 15.0 + (DateTime.now().millisecond % 20);
       double randomUl = 5.0 + (DateTime.now().millisecond % 5);
       
-      // Плавно подмешиваем фейк
       _smoothDl = (_smoothDl * 0.9) + (randomDl * 0.1);
       _smoothUl = (_smoothUl * 0.9) + (randomUl * 0.1);
       
       if (ping == "-" || ping == "0") ping = (35 + (DateTime.now().millisecond % 10)).toString();
     }
 
-    // Убираем "шум" (слишком мелкие значения обнуляем)
     if (_smoothDl < 0.1) _smoothDl = 0.0;
     if (_smoothUl < 0.1) _smoothUl = 0.0;
 
-    // 4. ОБНОВЛЕНИЕ UI
     if (mounted) {
       setState(() {
         dlSpeed = _smoothDl.toStringAsFixed(1);
@@ -1874,14 +1841,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
         
         double chartVal = 0.0;
         if (_smoothDl > 0) {
-          // Масштабируем: 100 Мбит = полный график (1.0).
-          // Используем clamp, чтобы не вылезти за пределы (ошибка сплошной заливки)
+
           chartVal = (_smoothDl / 100).clamp(0.0, 1.0);
           
-          // Делаем линию видимой даже при малой скорости
           if (chartVal < 0.05) chartVal = 0.05;
           
-          // Добавляем микро-дрожание для эффекта "живого" графика
           double noise = ((DateTime.now().millisecond % 20) - 10) / 1000; 
           chartVal = (chartVal + noise).clamp(0.01, 1.0);
         }
@@ -2008,7 +1972,7 @@ class BigChartPainter extends CustomPainter {
     canvas.drawLine(Offset(0, size.height * 0.5), Offset(size.width, size.height * 0.5), gridPaint);
     canvas.drawLine(Offset(0, 0), Offset(size.width, 0), gridPaint);
     
-    // 2. Настраиваем кисть для линии графика
+   
     final linePaint = Paint()
       ..color = isActive ? const Color(0xFF00E5FF) : Colors.white10
       ..strokeWidth = 3
@@ -2018,7 +1982,7 @@ class BigChartPainter extends CustomPainter {
     final path = Path();
     final stepX = size.width / (data.length - 1);
 
-    // Строим кривую Безье (чтобы график был плавным)
+    // кривая
     for (int i = 0; i < data.length; i++) {
       final x = i * stepX;
       final y = size.height - (data[i] * size.height * 0.8); // 0.8 чтобы не упирался в потолок
@@ -2034,7 +1998,7 @@ class BigChartPainter extends CustomPainter {
       }
     }
     
-    // 3. Рисуем заливку под графиком (Градиент)
+    // заливка под графиком
     if (isActive) {
       final fillPath = Path.from(path)
         ..lineTo(size.width, size.height)
@@ -2055,15 +2019,13 @@ class BigChartPainter extends CustomPainter {
       canvas.drawPath(fillPath, fillPaint);
     }
 
-    // 4. Рисуем саму линию
+    // сама линия
     canvas.drawPath(path, linePaint);
   }
 
   @override
   bool shouldRepaint(covariant BigChartPainter oldDelegate) => true;
 }
-
-// === GLASSMORPHIC UI COMPONENTS ===
 
 class GlassmorphicContainer extends StatelessWidget {
   final double blur;
